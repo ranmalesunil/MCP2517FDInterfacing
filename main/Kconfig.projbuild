@@ -1,0 +1,100 @@
+menu "MCP2517FD CAN FD Configuration"
+
+    config MCP2517FD_PIN_CS
+        int "SPI CS GPIO Number"
+        default 10
+        help
+            GPIO connected to MCP2517FD nCS (Pin 13).
+
+    config MCP2517FD_PIN_MOSI
+        int "SPI MOSI / SDI GPIO Number"
+        default 11
+        help
+            GPIO connected to MCP2517FD SDI (Pin 11).
+
+    config MCP2517FD_PIN_SCK
+        int "SPI SCK GPIO Number"
+        default 12
+        help
+            GPIO connected to MCP2517FD SCK (Pin 10).
+
+    config MCP2517FD_PIN_MISO
+        int "SPI MISO / SDO GPIO Number"
+        default 13
+        help
+            GPIO connected to MCP2517FD SDO (Pin 12).
+
+    config MCP2517FD_PIN_INT
+        int "Interrupt INT GPIO Number"
+        default 14
+        help
+            GPIO connected to MCP2517FD INT (Pin 4).
+
+    choice MCP2517FD_OSC_FREQ
+        prompt "MCP2517FD Oscillator Frequency"
+        default MCP2517FD_OSC_40MHZ
+        help
+            Oscillator frequency on the MCP2517FD board (usually 40MHz or 20MHz).
+
+        config MCP2517FD_OSC_40MHZ
+            bool "40 MHz"
+        config MCP2517FD_OSC_20MHZ
+            bool "20 MHz"
+    endchoice
+
+    config MCP2517FD_NOMINAL_BITRATE
+        int "Nominal / Arbitration Bitrate (bps)"
+        default 500000
+        help
+            CAN FD Nominal/Arbitration bitrate (e.g. 500000 for 500 kbps).
+
+    config MCP2517FD_DATA_BITRATE
+        int "Data Bitrate (bps)"
+        default 2000000
+        help
+            CAN FD Data phase bitrate (e.g. 2000000 for 2 Mbps).
+
+    config CANFD_MONITOR_INTERVAL_MS
+        int "Monitor Display Interval (ms)"
+        default 1000
+        help
+            Interval in milliseconds between console stats dashboard updates.
+
+    config CANFD_ENABLE_HEARTBEAT
+        bool "Enable Periodic Heartbeat Transmission"
+        default y
+        help
+            Periodically transmit a heartbeat message from ESP32-S3 over the CAN bus.
+
+    config CANFD_HEARTBEAT_ID
+        hex "Heartbeat CAN ID"
+        default 0x700
+        depends on CANFD_ENABLE_HEARTBEAT
+        help
+            CAN Identifier for heartbeat frame (e.g. 0x700).
+
+    choice CANFD_HEARTBEAT_FORMAT
+        prompt "Heartbeat Frame Format"
+        default CANFD_HEARTBEAT_CLASSIC_CAN
+        depends on CANFD_ENABLE_HEARTBEAT
+        help
+            Select whether heartbeat is Classic CAN 2.0 or CAN FD.
+
+        config CANFD_HEARTBEAT_CLASSIC_CAN
+            bool "Classic CAN 2.0 (Solid 500 kbps, No FD, No BRS - Recommended)"
+            help
+                Standard CAN 2.0B frame. Transmitted at 500 kbps throughout the entire frame.
+                Widest timing tolerance, compatible with all CAN tools and bus conditions.
+
+        config CANFD_HEARTBEAT_FD_NO_BRS
+            bool "CAN FD without BRS (500 kbps throughout)"
+            help
+                CAN FD frame format, but without switching to high-speed data rate.
+
+        config CANFD_HEARTBEAT_FD_BRS
+            bool "CAN FD with BRS (500 kbps Nominal, 2 Mbps Data phase)"
+            help
+                CAN FD frame with Bit Rate Switch enabled (payload transmitted at 2 Mbps).
+    endchoice
+
+endmenu
