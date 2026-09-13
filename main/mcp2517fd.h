@@ -1,14 +1,55 @@
-#pragma once
+#ifndef MCP2517FD_H_
+#define MCP2517FD_H_
 
 #include <stdint.h>
 #include <stdbool.h>
 #include "esp_err.h"
 #include "driver/gpio.h"
+#include "sdkconfig.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+/* =========================================================================
+ * Hardware Pin Configurations (from Kconfig with defaults)
+ * ========================================================================= */
+#ifndef CONFIG_MCP2517FD_PIN_CS
+#define CONFIG_MCP2517FD_PIN_CS 10
+#endif
+#ifndef CONFIG_MCP2517FD_PIN_MOSI
+#define CONFIG_MCP2517FD_PIN_MOSI 11
+#endif
+#ifndef CONFIG_MCP2517FD_PIN_SCK
+#define CONFIG_MCP2517FD_PIN_SCK 12
+#endif
+#ifndef CONFIG_MCP2517FD_PIN_MISO
+#define CONFIG_MCP2517FD_PIN_MISO 13
+#endif
+#ifndef CONFIG_MCP2517FD_PIN_INT
+#define CONFIG_MCP2517FD_PIN_INT 14
+#endif
+#ifndef CONFIG_MCP2517FD_NOMINAL_BITRATE
+#define CONFIG_MCP2517FD_NOMINAL_BITRATE 500000U
+#endif
+#ifndef CONFIG_MCP2517FD_DATA_BITRATE
+#define CONFIG_MCP2517FD_DATA_BITRATE 2000000U
+#endif
+
+#define MCP2517FD_PIN_CS        ((gpio_num_t)CONFIG_MCP2517FD_PIN_CS)
+#define MCP2517FD_PIN_MOSI      ((gpio_num_t)CONFIG_MCP2517FD_PIN_MOSI)
+#define MCP2517FD_PIN_SCK       ((gpio_num_t)CONFIG_MCP2517FD_PIN_SCK)
+#define MCP2517FD_PIN_MISO      ((gpio_num_t)CONFIG_MCP2517FD_PIN_MISO)
+#define MCP2517FD_PIN_INT       ((gpio_num_t)CONFIG_MCP2517FD_PIN_INT)
+#define MCP2517FD_PIN_STBY0     ((gpio_num_t)GPIO_NUM_15)
+#define MCP2517FD_PIN_STBY1     ((gpio_num_t)GPIO_NUM_16)
+
+#define MCP2517FD_NOMINAL_RATE  ((uint32_t)CONFIG_MCP2517FD_NOMINAL_BITRATE)
+#define MCP2517FD_DATA_RATE     ((uint32_t)CONFIG_MCP2517FD_DATA_BITRATE)
+
+/* =========================================================================
+ * Data Structures
+ * ========================================================================= */
 typedef struct {
     uint32_t id;         /**< CAN Identifier (11-bit standard or 29-bit extended) */
     uint8_t  len;        /**< Payload length in bytes (0..64) */
@@ -57,6 +98,16 @@ typedef struct {
     uint32_t   data_bitrate;    /**< Data bitrate in bps (e.g. 2000000U) */
 } mcp2517fd_config_t;
 
+/* =========================================================================
+ * Driver API Functions
+ * ========================================================================= */
+
+/**
+ * @brief Populate a configuration structure with default pins and settings
+ * @param config Pointer to configuration struct to populate
+ */
+void mcp2517fd_get_default_config(mcp2517fd_config_t *config);
+
 /**
  * @brief Initialize SPI bus, GPIOs, and MCP2517FD CAN FD controller
  * @param config Pointer to configuration struct
@@ -103,6 +154,53 @@ uint32_t mcp2517fd_get_rx_overflow_count(void);
  */
 esp_err_t mcp2517fd_get_diag(mcp2517fd_diag_t *diag);
 
+/**
+ * @brief Dynamically set CAN nominal and data bitrates
+ * @param nominal_bps Nominal/arbitration bitrate in bps (e.g. 500000, 250000, 125000, 1000000)
+ * @param data_bps Data bitrate in bps (e.g. 2000000, 4000000, 5000000, or 0/same for CAN 2.0)
+ * @return ESP_OK on success, or error code
+ */
+esp_err_t mcp2517fd_set_bitrate(uint32_t nominal_bps, uint32_t data_bps);
+
+/**
+ * @brief Dynamically change MCP2517FD operational mode
+ * @param mode Target mode (e.g. MCP2517FD_MODE_NORMAL_CANFD, MCP2517FD_MODE_LISTEN_ONLY, etc.)
+ * @return ESP_OK on success, or error code
+ */
+esp_err_t mcp2517fd_set_mode(uint8_t mode);
+
+/**
+ * @brief Dynamically configure an acceptance filter and mask
+ * @param filter_idx Filter index (0..31)
+ * @param filter_id Filter CAN ID
+ * @param mask Mask value (0 = accept all, 0x7FF/0x1FFFFFFF = exact match)
+ * @param is_ext true if matching 29-bit extended ID
+ * @return ESP_OK on success, or error code
+ */
+esp_err_t mcp2517fd_set_filter(uint8_t filter_idx, uint32_t filter_id, uint32_t mask, bool is_ext);
+
+/**
+ * @brief Enable or disable CAN bus activity (Bus-On / Bus-Off)
+ * @param enable true for Bus-On (Normal CAN FD), false for Bus-Off (Configuration mode)
+ * @return ESP_OK on success
+ */
+esp_err_t mcp2517fd_bus_control(bool enable);
+
+/**
+ * @brief Query current operational mode
+ * @return Current mode code
+ */
+uint8_t mcp2517fd_get_mode(void);
+
+/**
+ * @brief Query currently configured bitrates
+ * @param nominal_bps Pointer to store nominal bitrate
+ * @param data_bps Pointer to store data bitrate
+ */
+void mcp2517fd_get_bitrates(uint32_t *nominal_bps, uint32_t *data_bps);
+
 #ifdef __cplusplus
 }
 #endif
+
+#endif /* MCP2517FD_H_ */

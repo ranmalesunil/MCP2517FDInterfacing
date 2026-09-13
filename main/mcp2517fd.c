@@ -14,6 +14,10 @@ static const char *TAG = "MCP2517FD";
 static spi_device_handle_t s_spi_dev = NULL;
 static SemaphoreHandle_t s_spi_mutex = NULL;
 static uint32_t s_rx_overflow_count = 0U;
+static uint32_t s_current_nominal_bps = MCP2517FD_NOMINAL_RATE;
+static uint32_t s_current_data_bps = MCP2517FD_DATA_RATE;
+static uint8_t s_current_mode = MCP2517FD_MODE_NORMAL_CANFD;
+static mcp2517fd_osc_t s_current_osc = MCP2517FD_OSC_40MHZ;
 static const uint8_t s_dlc_to_len[16] = {0U, 1U, 2U, 3U, 4U, 5U, 6U, 7U, 8U, 12U, 16U, 20U, 24U, 32U, 48U, 64U};
 
 static uint8_t len_to_dlc(uint8_t len)
@@ -149,7 +153,7 @@ static esp_err_t mcp2517fd_request_mode(uint8_t mode)
                     in_cfg = true;
                     break;
                 }
-                vTaskDelay(pdMS_TO_TICKS(1U));
+                esp_rom_delay_us(100);
             }
             if (!in_cfg) {
                 ESP_LOGE(TAG, "Intermediate Configuration mode transition timeout! Actual: %u", (unsigned int)current_mode);
@@ -172,7 +176,7 @@ static esp_err_t mcp2517fd_request_mode(uint8_t mode)
                     mode_achieved = true;
                     break;
                 }
-                vTaskDelay(pdMS_TO_TICKS(1U));
+                esp_rom_delay_us(100);
             }
             if (!mode_achieved) {
                 ESP_LOGE(TAG, "Mode change timeout! Requested: %u, Actual: %u", (unsigned int)mode, (unsigned int)current_mode);
@@ -183,11 +187,45 @@ static esp_err_t mcp2517fd_request_mode(uint8_t mode)
     return ret;
 }
 
+void mcp2517fd_get_default_config(mcp2517fd_config_t *config)
+{
+    if (config != NULL) {
+        (void)memset(config, 0, sizeof(mcp2517fd_config_t));
+        config->cs_io = MCP2517FD_PIN_CS;
+        config->mosi_io = MCP2517FD_PIN_MOSI;
+        config->sck_io = MCP2517FD_PIN_SCK;
+        config->miso_io = MCP2517FD_PIN_MISO;
+        config->int_io = MCP2517FD_PIN_INT;
+        config->spi_speed_hz = 20000000U;
+#ifdef CONFIG_MCP2517FD_OSC_20MHZ
+        config->osc = MCP2517FD_OSC_20MHZ;
+#else
+        config->osc = MCP2517FD_OSC_40MHZ;
+#endif
+        config->nominal_bitrate = MCP2517FD_NOMINAL_RATE;
+        config->data_bitrate = MCP2517FD_DATA_RATE;
+    }
+}
+
 esp_err_t mcp2517fd_init(const mcp2517fd_config_t *config)
 {
     if (config == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
+
+    s_current_nominal_bps = config->nominal_bitrate;
+    s_current_data_bps = config->data_bitrate;
+    s_current_osc = config->osc;
+    s_current_mode = MCP2517FD_MODE_NORMAL_CANFD;
+
+    /* Drive optional transceiver standby pins LOW to disable standby */
+    (void)gpio_reset_pin(MCP2517FD_PIN_STBY0);
+    (void)gpio_set_direction(MCP2517FD_PIN_STBY0, GPIO_MODE_OUTPUT);
+    (void)gpio_set_level(MCP2517FD_PIN_STBY0, 0);
+
+    (void)gpio_reset_pin(MCP2517FD_PIN_STBY1);
+    (void)gpio_set_direction(MCP2517FD_PIN_STBY1, GPIO_MODE_OUTPUT);
+    (void)gpio_set_level(MCP2517FD_PIN_STBY1, 0);
 
     ESP_LOGI(TAG, "Initializing MCP2517FD SPI bus (MOSI=%d, MISO=%d, SCK=%d, CS=%d, INT=%d)...",
              (int)config->mosi_io, (int)config->miso_io, (int)config->sck_io, (int)config->cs_io, (int)config->int_io);
@@ -238,12 +276,12 @@ esp_err_t mcp2517fd_init(const mcp2517fd_config_t *config)
             in_config = true;
             break;
         }
-        vTaskDelay(pdMS_TO_TICKS(1U));
+        esp_rom_delay_us(100);
     }
     if (!in_config) {
         ESP_LOGW(TAG, "Chip not in Configuration mode immediately after reset, attempting direct mode request...");
         mcp2517fd_write8((uint16_t)(MCP2517FD_REG_CiCON + 3U), (uint8_t)(MCP2517FD_MODE_CONFIGURATION | (1U << 3U)));
-        vTaskDelay(pdMS_TO_TICKS(5U));
+        vTaskDelay(pdMS_TO_TICKS(10U));
     }
 
     /* 3. Verify communication with RAM read/write check */
@@ -270,7 +308,7 @@ esp_err_t mcp2517fd_init(const mcp2517fd_config_t *config)
 
     /* 4. Configure Oscillator */
     mcp2517fd_write8(MCP2517FD_REG_OSC, 0x00U); /* divide by 1, no PLL */
-    vTaskDelay(pdMS_TO_TICKS(5U));
+    vTaskDelay(pdMS_TO_TICKS(10U));
 
     uint8_t osc_val = mcp2517fd_read8(MCP2517FD_REG_OSC);
     uint8_t osc_sta = mcp2517fd_read8((uint16_t)(MCP2517FD_REG_OSC + 1U));
@@ -328,24 +366,25 @@ esp_err_t mcp2517fd_init(const mcp2517fd_config_t *config)
 
     /* 9. Configure RX FIFO 1:
           - Payload size: 64 bytes (PLSIZE = 7)
-          - FIFO size: 16 entries (FSIZE = 15) -> 16 * 72 bytes = 1152 bytes in RAM
+          - FIFO size: 22 entries (FSIZE = 21) -> 22 * 72 bytes = 1584 bytes in RAM
           - RX FIFO (TXEN = 0)
           - Enable RX Not Empty Interrupt (TFNRFNIE = 1)
           - Enable Overflow Interrupt (RXOVIE = 1)
     */
-    uint8_t rx_fifo_pl_size = (uint8_t)((MCP2517FD_PLSIZE_64 << 5U) | 15U);
+    uint8_t rx_fifo_pl_size = (uint8_t)((MCP2517FD_PLSIZE_64 << 5U) | 21U);
     mcp2517fd_write8((uint16_t)(MCP2517FD_REG_CiFIFOCON(1U) + 3U), rx_fifo_pl_size);
     mcp2517fd_write8(MCP2517FD_REG_CiFIFOCON(1U), (uint8_t)(MCP2517FD_FIFOCON_TFNRFNIE | MCP2517FD_FIFOCON_RXOVIE));
 
     /* 10. Configure TX FIFO 2:
           - Payload size: 64 bytes (PLSIZE = 7)
-          - FIFO size: 8 entries (FSIZE = 7) -> 8 * 72 bytes = 576 bytes in RAM
-          - Total RAM used (FIFO1 + FIFO2) = 1152 + 576 = 1728 bytes (<= 2048)
+          - FIFO size: 6 entries (FSIZE = 5) -> 6 * 72 bytes = 432 bytes in RAM
+          - Total RAM used (FIFO1 + FIFO2) = 1584 + 432 = 2016 bytes (<= 2048)
           - TX FIFO (TXEN = 1)
     */
-    uint8_t tx_fifo_pl_size = (uint8_t)((MCP2517FD_PLSIZE_64 << 5U) | 7U);
+    uint8_t tx_fifo_pl_size = (uint8_t)((MCP2517FD_PLSIZE_64 << 5U) | 5U);
     mcp2517fd_write8((uint16_t)(MCP2517FD_REG_CiFIFOCON(2U) + 3U), tx_fifo_pl_size);
-    mcp2517fd_write8(MCP2517FD_REG_CiFIFOCON(2U), (uint8_t)MCP2517FD_FIFOCON_TXEN);
+    /* Enable TX FIFO with highest transmit priority (TXPRI = 3, bits [6:5] = 0b11) */
+    mcp2517fd_write8(MCP2517FD_REG_CiFIFOCON(2U), (uint8_t)(MCP2517FD_FIFOCON_TXEN | (3U << 5U)));
     /* Ensure TX FIFO is released from reset state (FRESET = 0) */
     mcp2517fd_write8((uint16_t)(MCP2517FD_REG_CiFIFOCON(2U) + 1U), 0x00U);
 
@@ -406,7 +445,7 @@ esp_err_t mcp2517fd_self_test(void)
             rx_ready = true;
             break;
         }
-        vTaskDelay(pdMS_TO_TICKS(1U));
+        esp_rom_delay_us(500);
     }
 
     if (!rx_ready) {
@@ -553,13 +592,21 @@ esp_err_t mcp2517fd_transmit_frame(const canfd_frame_t *frame)
     }
 
     if (s_spi_mutex != NULL) {
-        if (xSemaphoreTake(s_spi_mutex, pdMS_TO_TICKS(10U)) != pdTRUE) {
+        if (xSemaphoreTake(s_spi_mutex, pdMS_TO_TICKS(100U)) != pdTRUE) {
             return ESP_ERR_TIMEOUT;
         }
     }
 
     /* Check if TX FIFO 2 has space (TFNRFNIF = 1 means not full) */
     uint8_t fifo_sta = mcp2517fd_read8(MCP2517FD_REG_CiFIFOSTA(2U));
+
+    /* If FIFO 2 suffered an error or abort on a busy bus, reset FIFO 2 to restore transmission */
+    if ((fifo_sta & (MCP2517FD_FIFOSTA_TXABT | MCP2517FD_FIFOSTA_TXERR)) != 0U) {
+        mcp2517fd_write8((uint16_t)(MCP2517FD_REG_CiFIFOCON(2U) + 1U), (uint8_t)MCP2517FD_FIFOCON_FRESET);
+        mcp2517fd_write8((uint16_t)(MCP2517FD_REG_CiFIFOCON(2U) + 1U), 0x00U);
+        fifo_sta = mcp2517fd_read8(MCP2517FD_REG_CiFIFOSTA(2U));
+    }
+
     if ((fifo_sta & MCP2517FD_FIFOSTA_TFNRFNIF) == 0U) {
         if (s_spi_mutex != NULL) {
             (void)xSemaphoreGive(s_spi_mutex);
@@ -614,8 +661,9 @@ esp_err_t mcp2517fd_transmit_frame(const canfd_frame_t *frame)
         return err;
     }
 
-    /* Increment FIFO pointer and request transmission (UINC | TXREQ = 0x03) */
-    mcp2517fd_write8((uint16_t)(MCP2517FD_REG_CiFIFOCON(2U) + 1U), (uint8_t)(MCP2517FD_FIFOCON_UINC | MCP2517FD_FIFOCON_TXREQ));
+    /* Increment FIFO pointer, set unlimited retransmissions, and request transmission */
+    mcp2517fd_write8((uint16_t)(MCP2517FD_REG_CiFIFOCON(2U) + 1U),
+                     (uint8_t)(MCP2517FD_FIFOCON_TXAT_UNLIMITED | MCP2517FD_FIFOCON_UINC | MCP2517FD_FIFOCON_TXREQ));
 
     if (s_spi_mutex != NULL) {
         (void)xSemaphoreGive(s_spi_mutex);
@@ -674,4 +722,231 @@ esp_err_t mcp2517fd_get_diag(mcp2517fd_diag_t *diag)
         (void)xSemaphoreGive(s_spi_mutex);
     }
     return ESP_OK;
+}
+
+static esp_err_t mcp2517fd_calculate_timing(uint32_t nominal_bps, uint32_t data_bps, mcp2517fd_osc_t osc,
+                                            uint32_t *out_nbtcfg, uint32_t *out_dbtcfg, uint32_t *out_tdc)
+{
+    if ((out_nbtcfg == NULL) || (out_dbtcfg == NULL) || (out_tdc == NULL)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (osc == MCP2517FD_OSC_40MHZ) {
+        /* 40 MHz Oscillator */
+        switch (nominal_bps) {
+        case 1000000U:
+            *out_nbtcfg = (0UL << 24U) | (30UL << 16U) | (7UL << 8U) | 7UL; /* 40 TQ, 80% */
+            break;
+        case 500000U:
+            *out_nbtcfg = (4UL << 24U) | (11UL << 16U) | (2UL << 8U) | 2UL; /* 16 TQ, 81.25% (PCAN) */
+            break;
+        case 250000U:
+            *out_nbtcfg = (9UL << 24U) | (11UL << 16U) | (2UL << 8U) | 2UL; /* 16 TQ, 81.25% */
+            break;
+        case 125000U:
+            *out_nbtcfg = (19UL << 24U) | (11UL << 16U) | (2UL << 8U) | 2UL; /* 16 TQ, 81.25% */
+            break;
+        case 100000U:
+            *out_nbtcfg = (19UL << 24U) | (14UL << 16U) | (3UL << 8U) | 3UL; /* 20 TQ, 80% */
+            break;
+        case 50000U:
+            *out_nbtcfg = (39UL << 24U) | (14UL << 16U) | (3UL << 8U) | 3UL; /* 20 TQ, 80% */
+            break;
+        default:
+            ESP_LOGE(TAG, "Unsupported nominal bitrate: %lu bps", (unsigned long)nominal_bps);
+            return ESP_ERR_NOT_SUPPORTED;
+        }
+
+        switch (data_bps) {
+        case 5000000U:
+            *out_dbtcfg = (0UL << 24U) | (4UL << 16U) | (1UL << 8U) | 1UL;
+            *out_tdc = (1UL << 25U) | (1UL << 17U) | (5UL << 8U);
+            break;
+        case 4000000U:
+            *out_dbtcfg = (0UL << 24U) | (6UL << 16U) | (1UL << 8U) | 1UL;
+            *out_tdc = (1UL << 25U) | (1UL << 17U) | (7UL << 8U);
+            break;
+        case 2000000U:
+            *out_dbtcfg = (0UL << 24U) | (14UL << 16U) | (3UL << 8U) | 3UL;
+            *out_tdc = (1UL << 25U) | (1UL << 17U) | (15UL << 8U);
+            break;
+        case 1000000U:
+        case 0U: /* 0 means match nominal or Classic CAN */
+            *out_dbtcfg = (0UL << 24U) | (30UL << 16U) | (7UL << 8U) | 7UL;
+            *out_tdc = (1UL << 25U) | (1UL << 17U) | (31UL << 8U);
+            break;
+        default:
+            ESP_LOGE(TAG, "Unsupported data bitrate: %lu bps", (unsigned long)data_bps);
+            return ESP_ERR_NOT_SUPPORTED;
+        }
+    } else {
+        /* 20 MHz Oscillator */
+        switch (nominal_bps) {
+        case 1000000U:
+            *out_nbtcfg = (0UL << 24U) | (14UL << 16U) | (3UL << 8U) | 3UL;
+            break;
+        case 500000U:
+            *out_nbtcfg = (0UL << 24U) | (30UL << 16U) | (7UL << 8U) | 7UL;
+            break;
+        case 250000U:
+            *out_nbtcfg = (1UL << 24U) | (30UL << 16U) | (7UL << 8U) | 7UL;
+            break;
+        case 125000U:
+            *out_nbtcfg = (3UL << 24U) | (30UL << 16U) | (7UL << 8U) | 7UL;
+            break;
+        default:
+            return ESP_ERR_NOT_SUPPORTED;
+        }
+
+        switch (data_bps) {
+        case 2000000U:
+            *out_dbtcfg = (0UL << 24U) | (6UL << 16U) | (1UL << 8U) | 1UL;
+            *out_tdc = (1UL << 25U) | (1UL << 17U) | (7UL << 8U);
+            break;
+        case 1000000U:
+        case 0U:
+            *out_dbtcfg = (0UL << 24U) | (14UL << 16U) | (3UL << 8U) | 3UL;
+            *out_tdc = (1UL << 25U) | (1UL << 17U) | (15UL << 8U);
+            break;
+        default:
+            return ESP_ERR_NOT_SUPPORTED;
+        }
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t mcp2517fd_set_bitrate(uint32_t nominal_bps, uint32_t data_bps)
+{
+    uint32_t nbtcfg = 0U;
+    uint32_t dbtcfg = 0U;
+    uint32_t tdc = 0U;
+
+    esp_err_t err = mcp2517fd_calculate_timing(nominal_bps, data_bps, s_current_osc, &nbtcfg, &dbtcfg, &tdc);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    if (s_spi_mutex != NULL) {
+        if (xSemaphoreTake(s_spi_mutex, pdMS_TO_TICKS(100U)) != pdTRUE) {
+            return ESP_ERR_TIMEOUT;
+        }
+    }
+
+    uint8_t prev_mode = (uint8_t)((mcp2517fd_read8((uint16_t)(MCP2517FD_REG_CiCON + 2U)) >> 5U) & 0x07U);
+
+    err = mcp2517fd_request_mode(MCP2517FD_MODE_CONFIGURATION);
+    if (err == ESP_OK) {
+        mcp2517fd_write32(MCP2517FD_REG_CiNBTCFG, nbtcfg);
+        mcp2517fd_write32(MCP2517FD_REG_CiDBTCFG, dbtcfg);
+        mcp2517fd_write32(MCP2517FD_REG_CiTDC, tdc);
+        s_current_nominal_bps = nominal_bps;
+        s_current_data_bps = data_bps;
+
+        uint8_t target_mode = (prev_mode == MCP2517FD_MODE_CONFIGURATION) ? MCP2517FD_MODE_NORMAL_CANFD : prev_mode;
+        err = mcp2517fd_request_mode(target_mode);
+        s_current_mode = target_mode;
+        ESP_LOGI(TAG, "Bitrate updated: Nominal=%lu bps, Data=%lu bps",
+                 (unsigned long)nominal_bps, (unsigned long)data_bps);
+    }
+
+    if (s_spi_mutex != NULL) {
+        (void)xSemaphoreGive(s_spi_mutex);
+    }
+    return err;
+}
+
+esp_err_t mcp2517fd_set_mode(uint8_t mode)
+{
+    if (s_spi_mutex != NULL) {
+        if (xSemaphoreTake(s_spi_mutex, pdMS_TO_TICKS(100U)) != pdTRUE) {
+            return ESP_ERR_TIMEOUT;
+        }
+    }
+
+    esp_err_t err = mcp2517fd_request_mode(mode);
+    if (err == ESP_OK) {
+        s_current_mode = mode;
+        ESP_LOGI(TAG, "Mode updated to %u", (unsigned int)mode);
+    }
+
+    if (s_spi_mutex != NULL) {
+        (void)xSemaphoreGive(s_spi_mutex);
+    }
+    return err;
+}
+
+esp_err_t mcp2517fd_set_filter(uint8_t filter_idx, uint32_t filter_id, uint32_t mask, bool is_ext)
+{
+    if (filter_idx >= 32U) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (s_spi_mutex != NULL) {
+        if (xSemaphoreTake(s_spi_mutex, pdMS_TO_TICKS(100U)) != pdTRUE) {
+            return ESP_ERR_TIMEOUT;
+        }
+    }
+
+    uint8_t prev_mode = (uint8_t)((mcp2517fd_read8((uint16_t)(MCP2517FD_REG_CiCON + 2U)) >> 5U) & 0x07U);
+    esp_err_t err = mcp2517fd_request_mode(MCP2517FD_MODE_CONFIGURATION);
+    if (err == ESP_OK) {
+        uint32_t fltobj;
+        uint32_t maskreg;
+
+        if (mask == 0U) {
+            fltobj = 0U;
+            maskreg = 0U; /* MIDE=0: match both STD and EXT */
+        } else if (is_ext) {
+            fltobj = (filter_id & 0x3FFFFU) | (((filter_id >> 18U) & 0x7FFU) << 18U) | (1UL << 30U);
+            maskreg = (mask & 0x3FFFFU) | (((mask >> 18U) & 0x7FFU) << 18U) | (1UL << 30U);
+        } else {
+            fltobj = filter_id & 0x7FFU;
+            maskreg = (mask & 0x7FFU) | (1UL << 30U);
+        }
+
+        mcp2517fd_write32(MCP2517FD_REG_CiFLTOBJ(filter_idx), fltobj);
+        mcp2517fd_write32(MCP2517FD_REG_CiMASK(filter_idx), maskreg);
+        mcp2517fd_write8(MCP2517FD_REG_CiFLTCON(filter_idx), 0x81U);
+
+        uint8_t target_mode = (prev_mode == MCP2517FD_MODE_CONFIGURATION) ? MCP2517FD_MODE_NORMAL_CANFD : prev_mode;
+        err = mcp2517fd_request_mode(target_mode);
+        s_current_mode = target_mode;
+        ESP_LOGI(TAG, "Filter %u updated: ID=0x%08lX, Mask=0x%08lX, Ext=%d",
+                 (unsigned int)filter_idx, (unsigned long)filter_id, (unsigned long)mask, (int)is_ext);
+    }
+
+    if (s_spi_mutex != NULL) {
+        (void)xSemaphoreGive(s_spi_mutex);
+    }
+    return err;
+}
+
+esp_err_t mcp2517fd_bus_control(bool enable)
+{
+    if (enable) {
+        (void)gpio_set_level(MCP2517FD_PIN_STBY0, 0);
+        (void)gpio_set_level(MCP2517FD_PIN_STBY1, 0);
+        return mcp2517fd_set_mode(MCP2517FD_MODE_NORMAL_CANFD);
+    } else {
+        esp_err_t err = mcp2517fd_set_mode(MCP2517FD_MODE_CONFIGURATION);
+        (void)gpio_set_level(MCP2517FD_PIN_STBY0, 1);
+        (void)gpio_set_level(MCP2517FD_PIN_STBY1, 1);
+        return err;
+    }
+}
+
+uint8_t mcp2517fd_get_mode(void)
+{
+    return s_current_mode;
+}
+
+void mcp2517fd_get_bitrates(uint32_t *nominal_bps, uint32_t *data_bps)
+{
+    if (nominal_bps != NULL) {
+        *nominal_bps = s_current_nominal_bps;
+    }
+    if (data_bps != NULL) {
+        *data_bps = s_current_data_bps;
+    }
 }

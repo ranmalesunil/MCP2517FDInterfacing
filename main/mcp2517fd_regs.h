@@ -84,6 +84,8 @@ extern "C" {
 #define MCP2517FD_FIFOSTA_TFHALFIF      (1U << 1U) /* FIFO half empty/full */
 #define MCP2517FD_FIFOSTA_TFFULLIF      (1U << 2U) /* FIFO full */
 #define MCP2517FD_FIFOSTA_RXOVIF        (1U << 3U) /* RX overflow */
+#define MCP2517FD_FIFOSTA_TXABT         (1U << 6U) /* TX message aborted */
+#define MCP2517FD_FIFOSTA_TXERR         (1U << 7U) /* TX error occurred */
 
 /* FIFOCON control bits (MISRA C:2012 Rule 10.1 & Rule 12.2) */
 #define MCP2517FD_FIFOCON_TXEN          (1U << 7U) /* 1 = TX, 0 = RX */
@@ -93,6 +95,7 @@ extern "C" {
 #define MCP2517FD_FIFOCON_UINC          (1U << 0U) /* Byte 1: Increment head/tail pointer */
 #define MCP2517FD_FIFOCON_TXREQ         (1U << 1U) /* Byte 1: Request transmission */
 #define MCP2517FD_FIFOCON_FRESET        (1U << 2U) /* Byte 1: Reset FIFO */
+#define MCP2517FD_FIFOCON_TXAT_UNLIMITED (3U << 5U) /* Byte 1: Retransmission attempts unlimited */
 
 /* Interrupt flags in CiINT (MISRA C:2012 Rule 10.1 & Rule 12.2) */
 #define MCP2517FD_INT_TXIF              (1U << 0U)
